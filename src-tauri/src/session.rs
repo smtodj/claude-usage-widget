@@ -23,6 +23,94 @@ const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWe
 
 static POPUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+// --- Temporary diagnostics for the Google sign-in popup (v0.2.3) ---------
+// Shows, inside each login window, the page address (query values hidden)
+// and whether the popup is still connected to the window that opened it,
+// and logs every navigation to ~/Library/Logs/Claude Usage/login-diag.log.
+const DIAG_JS: &str = r##"
+(() => {
+  const state = { closeCalls: 0, messages: [] };
+  const origClose = window.close.bind(window);
+  window.close = () => { state.closeCalls++; try { origClose(); } catch (_) {} };
+  window.addEventListener("message", (e) => {
+    state.messages.push(e.origin || "?");
+    if (state.messages.length > 5) state.messages.shift();
+  });
+  const redact = (href) => {
+    try {
+      const u = new URL(href);
+      const keys = [...new URLSearchParams(u.search).keys()];
+      const hashKeys = [...new URLSearchParams(u.hash.replace(/^#/, "")).keys()];
+      return u.origin + u.pathname +
+        (keys.length ? "?" + keys.join("&") : "") +
+        (hashKeys.length ? "#" + hashKeys.join("&") : "");
+    } catch (_) { return String(href).slice(0, 120); }
+  };
+  const render = () => {
+    if (!document.body) return;
+    let el = document.getElementById("__cuw_diag");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "__cuw_diag";
+      el.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;" +
+        "background:#111;color:#0f0;font:11px/1.4 Menlo,monospace;padding:6px 8px;" +
+        "white-space:pre-wrap;word-break:break-all;opacity:.92;pointer-events:none";
+      document.body.appendChild(el);
+    }
+    let opener = "없음";
+    try { opener = window.opener ? (window.opener.closed ? "닫힘" : "있음") : "없음"; } catch (_) { opener = "있음(접근 불가)"; }
+    el.textContent = "[진단] opener: " + opener +
+      " · close 호출: " + state.closeCalls +
+      " · 받은 메시지: " + (state.messages.join(", ") || "없음") +
+      "\n" + redact(location.href);
+  };
+  setInterval(render, 1000);
+  document.addEventListener("DOMContentLoaded", render);
+})();
+"##;
+
+fn diag_log(window: &str, url: &Url) {
+    use std::io::Write;
+    let Some(dir) = diag_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("login-diag.log"))
+    else {
+        return;
+    };
+    let keys: Vec<String> = url.query_pairs().map(|(k, _)| k.into_owned()).collect();
+    let _ = writeln!(
+        f,
+        "{} [{window}] {}://{}{}{}",
+        chrono::Local::now().format("%H:%M:%S"),
+        url.scheme(),
+        url.host_str().unwrap_or(""),
+        url.path(),
+        if keys.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", keys.join("&"))
+        }
+    );
+}
+
+fn diag_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join("Library/Logs/Claude Usage"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var_os("TEMP")
+            .or_else(|| std::env::var_os("TMPDIR"))
+            .map(|t| std::path::PathBuf::from(t).join("Claude Usage"))
+    }
+}
+// -------------------------------------------------------------------------
+
 /// Opens `window.open()` popups (Google / Apple sign-in) as real windows
 /// that share the login window's cookies.
 ///
@@ -41,7 +129,16 @@ fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
     let nav_label = label.clone();
     let built = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
         .window_features(features)
+        .initialization_script(DIAG_JS)
+        .on_page_load(|window, payload| {
+            let _ = window.set_title(&format!(
+                "로그인 · {}{}",
+                payload.url().host_str().unwrap_or(""),
+                payload.url().path()
+            ));
+        })
         .on_navigation(move |url| {
+            diag_log("popup", url);
             if !is_claude(url) {
                 left_claude.store(true, Ordering::Relaxed);
                 return true;
@@ -125,7 +222,15 @@ pub fn open_login_window(app: &AppHandle, on_login: impl Fn(&AppHandle) + Send +
     let built = WebviewWindowBuilder::new(app, LOGIN_LABEL, WebviewUrl::External(url))
         .title("claude.ai 로그인 · Claude Usage")
         .user_agent(SAFARI_UA)
-        .on_new_window(move |url, features| open_popup(&popup_app, url, features))
+        .on_new_window(move |url, features| {
+            diag_log("window.open", &url);
+            open_popup(&popup_app, url, features)
+        })
+        .initialization_script(DIAG_JS)
+        .on_navigation(|url| {
+            diag_log("login", url);
+            true
+        })
         .inner_size(480.0, 720.0)
         .center()
         .focused(true)
