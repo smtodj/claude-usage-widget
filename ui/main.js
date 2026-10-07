@@ -67,8 +67,13 @@ function render(snap) {
     ? (snap.usage ? "최신 값이 아니에요. " : "") + snap.error
     : "";
   $("checked").textContent = snap.checked_at
-    ? `마지막 확인: ${new Date(snap.checked_at).toLocaleTimeString("ko-KR")} · 2분마다 자동 갱신`
+    ? `마지막 확인 ${new Date(snap.checked_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` +
+      (snap.source ? ` · ${snap.source}` : "")
     : "";
+  const account = $("account");
+  account.hidden = false;
+  account.textContent = snap.web_logged_in ? "claude.ai 로그아웃" : "claude.ai로 로그인";
+  account.onclick = () => invoke(snap.web_logged_in ? "logout" : "login");
 }
 
 $("refresh").addEventListener("click", () => invoke("refresh_usage"));

@@ -1,3 +1,5 @@
+mod session;
+
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -9,7 +11,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use usage_core::{format_reset, short_label, Usage};
+use usage_core::{format_reset, short_label, Usage, UsageError};
 
 const TRAY_ID: &str = "main";
 const POLL_INTERVAL: Duration = Duration::from_secs(120);
@@ -21,6 +23,10 @@ struct Snapshot {
     error: Option<String>,
     /// When `error` is set, `usage` is the last good reading (stale).
     checked_at: Option<DateTime<Utc>>,
+    /// Where the numbers came from: "claude.ai 로그인" or "Claude Code".
+    source: Option<&'static str>,
+    /// Whether a claude.ai session is stored (shows "로그아웃" instead of "로그인").
+    web_logged_in: bool,
 }
 
 struct AppState {
@@ -36,6 +42,23 @@ fn get_usage(state: tauri::State<'_, AppState>) -> Snapshot {
 #[tauri::command]
 fn refresh_usage(state: tauri::State<'_, AppState>) {
     request_refresh(&state);
+}
+
+// Async so they run off the main thread: creating a window from a sync
+// command deadlocks on Windows.
+#[tauri::command]
+async fn login(app: AppHandle) {
+    open_login(&app);
+}
+
+#[tauri::command]
+async fn logout(app: AppHandle) {
+    session::logout(&app);
+    request_refresh(&app.state::<AppState>());
+}
+
+fn open_login(app: &AppHandle) {
+    session::open_login_window(app, |app| request_refresh(&app.state::<AppState>()));
 }
 
 fn request_refresh(state: &AppState) {
@@ -54,7 +77,12 @@ pub fn run() {
             snapshot: Mutex::new(Snapshot::default()),
             refresh_tx: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![get_usage, refresh_usage])
+        .invoke_handler(tauri::generate_handler![
+            get_usage,
+            refresh_usage,
+            login,
+            logout
+        ])
         .setup(|app| {
             // Menu bar only: no Dock icon.
             #[cfg(target_os = "macos")]
@@ -77,6 +105,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             // Closing the details window only hides it; the tray keeps running.
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -99,29 +130,55 @@ fn start_polling(app: AppHandle) {
     let (tx, rx) = mpsc::channel::<()>();
     *app.state::<AppState>().refresh_tx.lock().unwrap() = Some(tx);
 
-    std::thread::spawn(move || loop {
-        let result = usage_core::current_usage();
-        let snapshot = {
-            let state = app.state::<AppState>();
-            let mut snap = state.snapshot.lock().unwrap();
-            match result {
-                Ok(usage) => {
-                    snap.usage = Some(usage);
-                    snap.error = None;
-                }
-                Err(e) => snap.error = Some(e.to_string()),
+    std::thread::spawn(move || {
+        let mut first = true;
+        loop {
+            poll_once(&app, first);
+            first = false;
+            match rx.recv_timeout(POLL_INTERVAL) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
-            snap.checked_at = Some(Utc::now());
-            snap.clone()
-        };
-        update_tray(&app, snapshot.clone());
-        let _ = app.emit("usage-updated", snapshot);
-
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
         }
     });
+}
+
+/// A stored claude.ai login wins; otherwise Claude Code's token is used.
+fn read_usage() -> (Result<Usage, UsageError>, &'static str, bool) {
+    match session::load() {
+        Some(key) => (usage_core::fetch_usage_web(&key), "claude.ai 로그인", true),
+        None => (usage_core::current_usage(), "Claude Code", false),
+    }
+}
+
+fn poll_once(app: &AppHandle, first: bool) {
+    let (result, source, web_logged_in) = read_usage();
+    // First launch with no login anywhere: open the login window right away.
+    if first && matches!(result, Err(UsageError::NotLoggedIn)) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || open_login(&handle));
+    }
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let mut snap = state.snapshot.lock().unwrap();
+        // Don't show the previous account's numbers after switching sources.
+        if snap.source.is_some() && snap.source != Some(source) {
+            snap.usage = None;
+        }
+        snap.source = Some(source);
+        snap.web_logged_in = web_logged_in;
+        match result {
+            Ok(usage) => {
+                snap.usage = Some(usage);
+                snap.error = None;
+            }
+            Err(e) => snap.error = Some(e.to_string()),
+        }
+        snap.checked_at = Some(Utc::now());
+        snap.clone()
+    };
+    update_tray(app, snapshot.clone());
+    let _ = app.emit("usage-updated", snapshot);
 }
 
 fn update_tray(app: &AppHandle, snapshot: Snapshot) {
@@ -185,7 +242,11 @@ fn build_menu(app: &AppHandle, s: &Snapshot) -> tauri::Result<Menu<Wry>> {
     }
     if let Some(at) = s.checked_at {
         let local: DateTime<Local> = at.into();
-        menu.append(&info(format!("마지막 확인: {}", local.format("%H:%M")))?)?;
+        let source = s.source.map(|x| format!(" · {x}")).unwrap_or_default();
+        menu.append(&info(format!(
+            "마지막 확인: {}{source}",
+            local.format("%H:%M")
+        ))?)?;
     }
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -203,6 +264,11 @@ fn build_menu(app: &AppHandle, s: &Snapshot) -> tauri::Result<Menu<Wry>> {
         true,
         None::<&str>,
     )?)?;
+    menu.append(&if s.web_logged_in {
+        MenuItem::with_id(app, "logout", "claude.ai 로그아웃", true, None::<&str>)?
+    } else {
+        MenuItem::with_id(app, "login", "claude.ai로 로그인…", true, None::<&str>)?
+    })?;
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     menu.append(&CheckMenuItem::with_id(
         app,
@@ -235,6 +301,11 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             };
             let snapshot = app.state::<AppState>().snapshot.lock().unwrap().clone();
             update_tray(app, snapshot);
+        }
+        "login" => open_login(app),
+        "logout" => {
+            session::logout(app);
+            request_refresh(&app.state::<AppState>());
         }
         "quit" => app.exit(0),
         _ => {}

@@ -1,27 +1,32 @@
 //! Reads how much of the Claude plan allowance is left.
 //!
-//! The numbers come from the same endpoint Claude Code's `/usage` command
-//! uses (`GET https://api.anthropic.com/api/oauth/usage`). It is
-//! authenticated with the OAuth token Claude Code already stores on the
-//! machine, so no API key is needed, and reading it does not consume usage.
-//! The endpoint is not publicly documented and may change.
+//! Two sources return the same numbers:
+//! - Claude Code's OAuth token, against the endpoint its `/usage` command
+//!   uses (`GET https://api.anthropic.com/api/oauth/usage`).
+//! - A claude.ai login session (`sessionKey` cookie), against the endpoint
+//!   the website's Settings → Usage page uses. See [`fetch_usage_web`].
+//!
+//! Reading usage does not consume it. Neither endpoint is publicly
+//! documented, and either may change.
 
 mod credentials;
 mod format;
 mod usage;
+mod web;
 
 pub use credentials::{read_credentials, Credentials, CredentialsSource};
 pub use format::{format_reset, short_label};
 pub use usage::{fetch_usage, parse_usage, Usage, UsageWindow};
+pub use web::fetch_usage_web;
 
 use std::fmt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UsageError {
-    #[error(
-        "Claude Code 로그인 정보를 찾지 못했어요. 터미널에서 `claude`를 실행해 로그인해 주세요."
-    )]
+    #[error("로그인이 필요해요. 메뉴에서 'claude.ai로 로그인…'을 눌러 주세요.")]
     NotLoggedIn,
+    #[error("claude.ai 로그인이 만료됐어요. 메뉴에서 'claude.ai로 로그인…'을 다시 눌러 주세요.")]
+    SessionExpired,
     #[error("Claude Code 토큰이 만료됐어요. 터미널에서 `claude`를 한 번 실행하면 갱신돼요.")]
     TokenExpired,
     #[error("인증에 실패했어요(401). 터미널에서 `claude`를 다시 실행해 주세요.")]
