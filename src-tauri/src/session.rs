@@ -3,8 +3,7 @@
 //! store (macOS Keychain / Windows Credential Manager). The password is
 //! typed into claude.ai itself; this app never sees it.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
@@ -111,25 +110,38 @@ fn diag_dir() -> Option<std::path::PathBuf> {
 }
 // -------------------------------------------------------------------------
 
-/// Opens `window.open()` popups (Google / Apple sign-in) as real windows
-/// that share the login window's cookies.
+/// Page script for sign-in popups: `window.close()` does nothing in an
+/// embedded webview, so turn it into a navigation to [`CLOSE_HOST`], which
+/// [`open_popup`] catches and answers by closing the window.
+const POPUP_CLOSE_JS: &str = r#"
+(() => {
+  const close = window.close.bind(window);
+  window.close = () => {
+    try { location.href = "https://close.claude-usage.invalid/"; } catch (_) { close(); }
+  };
+})();
+"#;
+const CLOSE_HOST: &str = "close.claude-usage.invalid";
+
+/// Opens `window.open()` popups (Google / Apple sign-in) as real windows.
 ///
-/// When the provider sends the popup back to claude.ai, claude.ai's page
-/// expects to hand the result to its opener and close itself, which the
-/// embedded webview doesn't carry through (the popup just goes blank). So
-/// that return trip is loaded in the login window instead, where claude.ai
-/// finishes the sign-in and sets its session cookie, and the popup closes.
+/// The window starts on `about:blank` and WebKit loads the requested page
+/// into it itself. Loading the URL from here instead would make it a fresh
+/// navigation that drops `window.opener`, and Google's sign-in hands its
+/// result back to claude.ai through `window.opener.postMessage`.
 fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWindowResponse<Wry> {
+    diag_log("window.open", &url);
     let label = format!(
         "login-popup-{}",
         POPUP_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let left_claude = Arc::new(AtomicBool::new(false));
     let nav_app = app.clone();
     let nav_label = label.clone();
-    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+    let blank: Url = "about:blank".parse().expect("valid URL");
+    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::External(blank))
         .window_features(features)
         .initialization_script(DIAG_JS)
+        .initialization_script(POPUP_CLOSE_JS)
         .on_page_load(|window, payload| {
             let _ = window.set_title(&format!(
                 "로그인 · {}{}",
@@ -139,26 +151,17 @@ fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
         })
         .on_navigation(move |url| {
             diag_log("popup", url);
-            if !is_claude(url) {
-                left_claude.store(true, Ordering::Relaxed);
-                return true;
-            }
-            // Only the GET return with the result in the query string can be
-            // replayed in another window (a form POST, as Apple may use,
-            // can't), and the claude.ai page that starts sign-in stays put.
-            if !left_claude.load(Ordering::Relaxed) || !carries_auth_result(url) {
+            if !is_close_request(url) {
                 return true;
             }
             let app = nav_app.clone();
             let label = nav_label.clone();
-            let url = url.clone();
             let _ = nav_app.run_on_main_thread(move || {
-                if let Some(login) = app.get_webview_window(LOGIN_LABEL) {
-                    let _ = login.navigate(url);
-                    let _ = login.set_focus();
-                }
                 if let Some(popup) = app.get_webview_window(&label) {
                     let _ = popup.destroy();
+                }
+                if let Some(login) = app.get_webview_window(LOGIN_LABEL) {
+                    let _ = login.set_focus();
                 }
             });
             false
@@ -174,12 +177,8 @@ fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
     }
 }
 
-fn is_claude(url: &Url) -> bool {
-    matches!(url.host_str(), Some(h) if h == "claude.ai" || h.ends_with(".claude.ai"))
-}
-
-fn carries_auth_result(url: &Url) -> bool {
-    url.query_pairs().any(|(k, _)| k == "code" || k == "state")
+fn is_close_request(url: &Url) -> bool {
+    url.host_str() == Some(CLOSE_HOST)
 }
 
 fn entry() -> keyring::Result<keyring::Entry> {
@@ -222,14 +221,13 @@ pub fn open_login_window(app: &AppHandle, on_login: impl Fn(&AppHandle) + Send +
     let built = WebviewWindowBuilder::new(app, LOGIN_LABEL, WebviewUrl::External(url))
         .title("claude.ai 로그인 · Claude Usage")
         .user_agent(SAFARI_UA)
-        .on_new_window(move |url, features| {
-            diag_log("window.open", &url);
-            open_popup(&popup_app, url, features)
-        })
+        .on_new_window(move |url, features| open_popup(&popup_app, url, features))
         .initialization_script(DIAG_JS)
         .on_navigation(|url| {
             diag_log("login", url);
-            true
+            // Page scripts can be shared with popups; never leave for the
+            // popups' close signal.
+            !is_close_request(url)
         })
         .inner_size(480.0, 720.0)
         .center()
@@ -282,15 +280,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognizes_claude_hosts() {
+    fn recognizes_close_requests() {
         let u = |s: &str| s.parse::<Url>().unwrap();
-        assert!(is_claude(&u("https://claude.ai/login/google-auth?code=x")));
-        assert!(is_claude(&u("https://www.claude.ai/")));
-        assert!(!is_claude(&u("https://accounts.google.com/o/oauth2/auth")));
-        assert!(!is_claude(&u("https://notclaude.ai/")));
-        assert!(carries_auth_result(&u(
-            "https://claude.ai/cb?code=a&state=b"
+        assert!(is_close_request(&u("https://close.claude-usage.invalid/")));
+        assert!(!is_close_request(&u(
+            "https://accounts.google.com/gsi/transform"
         )));
-        assert!(!carries_auth_result(&u("https://claude.ai/login")));
+        assert!(!is_close_request(&u("https://claude.ai/login")));
     }
 }
