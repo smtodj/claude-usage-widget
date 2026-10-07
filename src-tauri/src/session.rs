@@ -54,6 +54,10 @@ pub fn open_login_window(app: &AppHandle, on_login: impl Fn(&AppHandle) + Send +
         .title("claude.ai 로그인 · Claude Usage")
         .inner_size(480.0, 720.0)
         .center()
+        .focused(true)
+        // Stay in front: a menu bar app's windows otherwise open behind
+        // the active app.
+        .always_on_top(true)
         .build();
     let Ok(window) = built else {
         return;

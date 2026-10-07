@@ -57,7 +57,17 @@ async fn logout(app: AppHandle) {
     request_refresh(&app.state::<AppState>());
 }
 
+/// A menu bar (Accessory) app is never the active app, so its new windows
+/// open behind whatever the user is looking at unless it is activated.
+fn bring_app_forward(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
 fn open_login(app: &AppHandle) {
+    bring_app_forward(app);
     session::open_login_window(app, |app| request_refresh(&app.state::<AppState>()));
 }
 
@@ -153,8 +163,16 @@ fn read_usage() -> (Result<Usage, UsageError>, &'static str, bool) {
 
 fn poll_once(app: &AppHandle, first: bool) {
     let (result, source, web_logged_in) = read_usage();
-    // First launch with no login anywhere: open the login window right away.
-    if first && matches!(result, Err(UsageError::NotLoggedIn)) {
+    // First launch without a working login: open the login window right
+    // away. Claude Code being absent, expired or unreadable all count.
+    let needs_login = matches!(
+        result,
+        Err(UsageError::NotLoggedIn
+            | UsageError::TokenExpired
+            | UsageError::Unauthorized
+            | UsageError::Credentials(_))
+    );
+    if first && !web_logged_in && needs_login {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || open_login(&handle));
     }
@@ -287,6 +305,7 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         "refresh" => request_refresh(&app.state::<AppState>()),
         "details" => {
+            bring_app_forward(app);
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.set_focus();
