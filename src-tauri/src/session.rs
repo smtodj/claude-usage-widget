@@ -3,7 +3,8 @@
 //! store (macOS Keychain / Windows Credential Manager). The password is
 //! typed into claude.ai itself; this app never sees it.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
@@ -23,14 +24,48 @@ const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWe
 static POPUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Opens `window.open()` popups (Google / Apple sign-in) as real windows
-/// that share the login window's cookies and can report back to it.
+/// that share the login window's cookies.
+///
+/// When the provider sends the popup back to claude.ai, claude.ai's page
+/// expects to hand the result to its opener and close itself, which the
+/// embedded webview doesn't carry through (the popup just goes blank). So
+/// that return trip is loaded in the login window instead, where claude.ai
+/// finishes the sign-in and sets its session cookie, and the popup closes.
 fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWindowResponse<Wry> {
     let label = format!(
         "login-popup-{}",
         POPUP_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
+    let left_claude = Arc::new(AtomicBool::new(false));
+    let nav_app = app.clone();
+    let nav_label = label.clone();
     let built = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
         .window_features(features)
+        .on_navigation(move |url| {
+            if !is_claude(url) {
+                left_claude.store(true, Ordering::Relaxed);
+                return true;
+            }
+            // Only the GET return with the result in the query string can be
+            // replayed in another window (a form POST, as Apple may use,
+            // can't), and the claude.ai page that starts sign-in stays put.
+            if !left_claude.load(Ordering::Relaxed) || !carries_auth_result(url) {
+                return true;
+            }
+            let app = nav_app.clone();
+            let label = nav_label.clone();
+            let url = url.clone();
+            let _ = nav_app.run_on_main_thread(move || {
+                if let Some(login) = app.get_webview_window(LOGIN_LABEL) {
+                    let _ = login.navigate(url);
+                    let _ = login.set_focus();
+                }
+                if let Some(popup) = app.get_webview_window(&label) {
+                    let _ = popup.destroy();
+                }
+            });
+            false
+        })
         .title("로그인")
         .user_agent(SAFARI_UA)
         .always_on_top(true)
@@ -40,6 +75,14 @@ fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
         Ok(window) => NewWindowResponse::Create { window },
         Err(_) => NewWindowResponse::Allow,
     }
+}
+
+fn is_claude(url: &Url) -> bool {
+    matches!(url.host_str(), Some(h) if h == "claude.ai" || h.ends_with(".claude.ai"))
+}
+
+fn carries_auth_result(url: &Url) -> bool {
+    url.query_pairs().any(|(k, _)| k == "code" || k == "state")
 }
 
 fn entry() -> keyring::Result<keyring::Entry> {
@@ -127,4 +170,22 @@ pub fn open_login_window(app: &AppHandle, on_login: impl Fn(&AppHandle) + Send +
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_claude_hosts() {
+        let u = |s: &str| s.parse::<Url>().unwrap();
+        assert!(is_claude(&u("https://claude.ai/login/google-auth?code=x")));
+        assert!(is_claude(&u("https://www.claude.ai/")));
+        assert!(!is_claude(&u("https://accounts.google.com/o/oauth2/auth")));
+        assert!(!is_claude(&u("https://notclaude.ai/")));
+        assert!(carries_auth_result(&u(
+            "https://claude.ai/cb?code=a&state=b"
+        )));
+        assert!(!carries_auth_result(&u("https://claude.ai/login")));
+    }
 }
