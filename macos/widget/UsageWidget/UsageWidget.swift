@@ -143,12 +143,13 @@ struct UsageWidgetView: View {
 
     private var compact: Bool { family == .systemSmall }
 
+    /// Session and weekly only: a third row doesn't fit, and the other
+    /// limits the API returns (per-model or unnamed ones) say little here.
     private func shownWindows(_ data: UsageData) -> [UsageWindow] {
-        let main = ["five_hour", "seven_day"]
-        let first = data.windows.filter { main.contains($0.key) }
-        guard !compact else { return first }
-        let rest = data.windows.filter { !main.contains($0.key) }
-        return Array((first + rest).prefix(3))
+        let main = ["five_hour", "seven_day"].compactMap { key in
+            data.windows.first { $0.key == key }
+        }
+        return main.isEmpty ? Array(data.windows.prefix(2)) : main
     }
 
     var body: some View {
