@@ -3,9 +3,11 @@
 //! store (macOS Keychain / Windows Credential Manager). The password is
 //! typed into claude.ai itself; this app never sees it.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::{NewWindowFeatures, NewWindowResponse};
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder, Wry};
 
 const SERVICE: &str = "io.github.smtodj.claude-usage-widget";
 const ACCOUNT: &str = "claude.ai-sessionKey";
@@ -13,6 +15,32 @@ const LOGIN_LABEL: &str = "login";
 const LOGIN_URL: &str = "https://claude.ai/login";
 const COOKIE_URL: &str = "https://claude.ai";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+// Google refuses to sign in inside embedded webviews it recognizes, and the
+// default WKWebView user agent lacks the "Version/… Safari/…" part it looks
+// for. Present as Safari so "Google로 계속하기" works.
+const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+
+static POPUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Opens `window.open()` popups (Google / Apple sign-in) as real windows
+/// that share the login window's cookies and can report back to it.
+fn open_popup(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWindowResponse<Wry> {
+    let label = format!(
+        "login-popup-{}",
+        POPUP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        .window_features(features)
+        .title("로그인")
+        .user_agent(SAFARI_UA)
+        .always_on_top(true)
+        .focused(true)
+        .build();
+    match built {
+        Ok(window) => NewWindowResponse::Create { window },
+        Err(_) => NewWindowResponse::Allow,
+    }
+}
 
 fn entry() -> keyring::Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, ACCOUNT)
@@ -50,10 +78,17 @@ pub fn open_login_window(app: &AppHandle, on_login: impl Fn(&AppHandle) + Send +
         return;
     }
     let url: Url = LOGIN_URL.parse().expect("valid login URL");
+    let popup_app = app.clone();
     let built = WebviewWindowBuilder::new(app, LOGIN_LABEL, WebviewUrl::External(url))
         .title("claude.ai 로그인 · Claude Usage")
+        .user_agent(SAFARI_UA)
+        .on_new_window(move |url, features| open_popup(&popup_app, url, features))
         .inner_size(480.0, 720.0)
         .center()
+        .focused(true)
+        // Stay in front: a menu bar app's windows otherwise open behind
+        // the active app.
+        .always_on_top(true)
         .build();
     let Ok(window) = built else {
         return;
@@ -80,6 +115,11 @@ pub fn open_login_window(app: &AppHandle, on_login: impl Fn(&AppHandle) + Send +
                 .map(|c| c.value().to_string());
             if let Some(key) = key {
                 if save(&key).is_ok() {
+                    for (label, w) in app.webview_windows() {
+                        if label.starts_with("login-popup-") {
+                            let _ = w.destroy();
+                        }
+                    }
                     let _ = window.destroy();
                     on_login(&app);
                 }
