@@ -33,6 +33,9 @@ jobs:
           targets: ${{ matrix.rust-targets }}
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
+      - name: Build desktop widget
+        if: runner.os == 'macOS'
+        run: sh macos/build-widget.sh
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
