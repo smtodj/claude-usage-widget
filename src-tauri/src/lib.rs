@@ -1,4 +1,5 @@
 mod session;
+mod widget;
 
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Mutex;
@@ -196,6 +197,7 @@ fn poll_once(app: &AppHandle, first: bool) {
         snap.clone()
     };
     update_tray(app, snapshot.clone());
+    widget::publish(snapshot.usage.as_ref(), snapshot.error.as_deref());
     let _ = app.emit("usage-updated", snapshot);
 }
 

@@ -1,0 +1,51 @@
+# XcodeGen spec for the macOS desktop widget. Built by macos/build-widget.sh
+# and copied into the app bundle through tauri.conf.json's bundle.macOS.files.
+name: ClaudeUsageWidget
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    # Ad-hoc signing: no Apple developer account. The widget reads its data
+    # from its own sandbox container, which works without a Team ID.
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  UsageWidget:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources: [UsageWidget]
+    info:
+      path: build/UsageWidget-Info.plist
+      properties:
+        CFBundleDisplayName: Claude Usage
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: build/UsageWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.smtodj.claude-usage-widget.widget
+        PRODUCT_NAME: UsageWidget
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+  widget-reload:
+    type: tool
+    platform: macOS
+    deploymentTarget: "11.0"
+    sources: [WidgetReload]
+    settings:
+      base:
+        PRODUCT_NAME: widget-reload
+    dependencies:
+      - sdk: WidgetKit.framework

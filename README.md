@@ -26,6 +26,7 @@ Claude Pro / Max 구독의 **5시간 세션 한도**와 **주간 한도**가 몇
 <img src="assets/screenshot-details.png" width="360" alt="자세히 보기 창">
 
 - 지원: **macOS 11+** (Apple Silicon / Intel 공용), Windows (실험적)
+- macOS 14 (Sonoma) 이상에서는 **바탕화면 위젯**으로도 볼 수 있어요.
 - 2분마다 자동으로 갱신돼요.
 - 사용량을 *조회*만 하므로 Claude 사용량을 소모하지 않아요.
 
@@ -51,6 +52,14 @@ Claude Pro / Max 구독 계정만 있으면 돼요. 로그인 방법은 둘 중 
    또는 Finder에서 앱을 **우클릭 → 열기**를 선택해도 돼요.
 4. 메뉴바에 게이지 아이콘과 `5h 72% · 7d 39%` 같은 숫자가 나타나면 성공이에요. Dock에는 아이콘이 생기지 않아요.
 5. 로그인할 때마다 자동으로 켜지게 하려면 메뉴에서 **로그인 시 자동 실행**을 체크하세요.
+
+### 바탕화면 위젯 (macOS 14+)
+
+1. 앱을 `응용 프로그램` 폴더에 넣고 한 번 실행해요.
+2. 바탕화면 빈 곳을 **우클릭 → 위젯 편집…** 을 눌러요.
+3. 목록에서 **Claude Usage**를 찾아 작은 크기나 중간 크기 위젯을 바탕화면에 끌어다 놓아요.
+
+위젯은 메뉴바 앱이 읽어 온 값을 보여줘요. 메뉴바 앱이 꺼져 있으면 값이 갱신되지 않으니 **로그인 시 자동 실행**을 켜 두세요. 위젯을 처음 놓은 뒤 숫자가 뜨기까지 최대 2분 정도 걸릴 수 있어요.
 
 처음 실행할 때 "키체인 접근 허용" 창이 뜨면 **항상 허용**을 눌러 주세요. 로그인 정보를 키체인에 저장하고 읽기 위한 것이에요.
 
@@ -87,15 +96,17 @@ Windows는 작업 표시줄 트레이에 숫자를 표시할 수 없어서, 트�
 | 토큰이 만료됐어요 / 인증에 실패했어요(401) | Claude Code 토큰은 몇 시간마다 만료되고, Claude Code를 쓸 때 자동으로 갱신돼요. 터미널에서 `claude`를 한 번 실행한 뒤 **지금 새로고침**을 누르세요. |
 | Keychain: ... | 키체인 접근을 거부한 경우예요. 앱을 다시 실행하고 **항상 허용**을 눌러 주세요. |
 | 요청이 너무 많아요(429) | 잠시 기다리면 다음 자동 갱신 때 다시 시도해요. |
+| 위젯 목록에 Claude Usage가 없어요 | 앱이 `응용 프로그램` 폴더에 있는지 확인하고, 앱을 한 번 실행한 뒤 위젯 편집을 다시 열어 보세요. |
 
 ## 직접 빌드하기
 
-필요한 것: [Rust](https://rustup.rs) (stable), [Node.js](https://nodejs.org) 20+
+필요한 것: [Rust](https://rustup.rs) (stable), [Node.js](https://nodejs.org) 20+. 바탕화면 위젯까지 빌드하려면 Xcode와 [XcodeGen](https://github.com/yonaskolb/XcodeGen)도 필요해요.
 
 ```sh
 git clone https://github.com/smtodj/claude-usage-widget
 cd claude-usage-widget
 npm install
+sh macos/build-widget.sh   # macOS: 위젯을 macos/build/에 빌드 (설치 파일 만들 때 필요)
 npm run dev        # 개발 모드로 실행
 npm run build      # 설치 파일 생성 (target/release/bundle/)
 ```
@@ -112,13 +123,14 @@ cargo run -p usage-core --example usage
 crates/usage-core/   토큰 읽기, API 호출, 응답 해석 (플랫폼 공통 Rust 라이브러리)
 src-tauri/           메뉴바/트레이 앱 (Tauri 2)
 ui/                  "자세히 보기" 창 (HTML/CSS/JS)
+macos/widget/        macOS 바탕화면 위젯 (Swift, WidgetKit)
 .github/workflows/   CI, 태그 푸시 시 릴리스 빌드
 ```
 
 ## 새 버전 배포하기
 
 1. `src-tauri/tauri.conf.json`, `Cargo.toml`, `package.json`의 버전을 올려요.
-2. 태그를 푸시하면 GitHub Actions가 macOS(universal)와 Windows 설치 파일을 빌드해 Releases에 올려요.
+2. 태그를 푸시하거나 Actions에서 **Release** 워크플로를 실행하면 GitHub Actions가 macOS(universal)와 Windows 설치 파일을 빌드해 Releases에 올려요.
 
    ```sh
    git tag v0.1.0
@@ -130,6 +142,7 @@ ui/                  "자세히 보기" 창 (HTML/CSS/JS)
 - [x] macOS 메뉴바
 - [x] Windows 트레이 (실험적)
 - [x] Claude Code 없이 claude.ai 로그인으로 사용
+- [x] macOS 바탕화면 위젯
 - [ ] iOS / Android: Tauri 2 모바일 빌드로 `usage-core`와 claude.ai 로그인 창을 재사용하고, 홈 화면 위젯은 각 플랫폼 네이티브(WidgetKit / Glance)로 붙일 예정이에요.
 - [ ] 사용량이 일정 비율 아래로 떨어지면 알림
 
