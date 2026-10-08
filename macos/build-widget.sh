@@ -16,7 +16,7 @@ xcodebuild \
   -configuration Release \
   -target UsageWidget -target widget-reload \
   ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
-  MARKETING_VERSION="$version" \
+  MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$version" \
   SYMROOT="$PWD/build/xcode" \
   -quiet build
 
@@ -30,5 +30,6 @@ cp build/xcode/Release/widget-reload "$out/"
 codesign --verify --strict --verbose "$out/UsageWidget.appex"
 codesign -d --entitlements - "$out/UsageWidget.appex" 2>/dev/null | grep -q app-sandbox
 codesign --verify --strict "$out/widget-reload"
+test "$(plutil -extract CFBundleVersion raw "$out/UsageWidget.appex/Contents/Info.plist")" = "$version"
 lipo -archs "$out/UsageWidget.appex/Contents/MacOS/UsageWidget"
 echo "widget built: $out/UsageWidget.appex (v$version)"
