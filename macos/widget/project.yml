@@ -13,6 +13,8 @@ settings:
     ENABLE_HARDENED_RUNTIME: NO
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.0.0"
+    # Overridden by build-widget.sh with the app version, so macOS notices
+    # an updated widget (it compares CFBundleVersion).
     CURRENT_PROJECT_VERSION: "1"
 targets:
   UsageWidget:
