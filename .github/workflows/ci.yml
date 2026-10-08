@@ -49,5 +49,6 @@ jobs:
           app="target/debug/bundle/macos/Claude Usage.app"
           test -x "$app/Contents/MacOS/widget-reload"
           plutil -p "$app/Contents/PlugIns/UsageWidget.appex/Contents/Info.plist" | grep widgetkit-extension
+          test "$(plutil -extract LSUIElement raw "$app/Contents/Info.plist")" = true
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --entitlements - "$app/Contents/PlugIns/UsageWidget.appex" 2>/dev/null | grep app-sandbox

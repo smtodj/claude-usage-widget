@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FBF6EE"/><stop offset="1" stop-color="#EBDFCC"/></linearGradient>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-opacity="0.25"/></filter>
+    <clipPath id="glass"><path d="M352 262 H672 C672 400 560 450 530 512 C560 574 672 624 672 762 H352 C352 624 464 574 494 512 C464 450 352 400 352 262 Z"/></clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#sh)"/>
+  <g clip-path="url(#glass)">
+    <rect x="300" y="380" width="424" height="140" fill="#D97757"/>
+    <path d="M352 762 C380 660 460 640 512 630 C564 640 644 660 672 762 Z" fill="#D97757"/>
+    <rect x="503" y="512" width="18" height="130" fill="#D97757"/>
+  </g>
+  <path d="M352 262 H672 C672 400 560 450 530 512 C560 574 672 624 672 762 H352 C352 624 464 574 494 512 C464 450 352 400 352 262 Z"
+        fill="none" stroke="#3D2B1F" stroke-width="30" stroke-linejoin="round"/>
+  <rect x="312" y="222" width="400" height="48" rx="24" fill="#3D2B1F"/>
+  <rect x="312" y="754" width="400" height="48" rx="24" fill="#3D2B1F"/>
+</svg>
