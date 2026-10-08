@@ -95,7 +95,8 @@ pub fn run() {
             logout
         ])
         .setup(|app| {
-            // Menu bar only: no Dock icon.
+            // Menu bar only: no Dock icon. Info.plist's LSUIElement already
+            // keeps it out of the Dock from launch; this covers `tauri dev`.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
