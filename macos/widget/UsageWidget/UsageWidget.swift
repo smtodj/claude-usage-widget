@@ -4,8 +4,21 @@
 // extension's sandbox container (its home directory) and asks WidgetKit to
 // reload. The widget only reads that file; it never talks to the network.
 
+import AppIntents
 import SwiftUI
 import WidgetKit
+
+/// The refresh button. The app rewrites `usage.json` every poll but only
+/// asks WidgetKit to redraw now and then (reloads are rationed), so the
+/// button just re-reads the file: WidgetKit reloads the timeline after a
+/// widget's intent runs, and user taps don't count against the budget.
+struct RefreshUsageIntent: AppIntent {
+    static var title: LocalizedStringResource = "사용량 새로 고침"
+
+    func perform() async throws -> some IntentResult {
+        .result()
+    }
+}
 
 struct UsageWindow: Decodable, Hashable {
     let key: String
@@ -165,6 +178,13 @@ struct UsageWidgetView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.orange)
                 }
+                Button(intent: RefreshUsageIntent()) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("새로 고침")
             }
             if let data = entry.data, !data.windows.isEmpty {
                 ForEach(shownWindows(data), id: \.self) { w in
