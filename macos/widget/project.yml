@@ -41,6 +41,7 @@ targets:
     dependencies:
       - sdk: WidgetKit.framework
       - sdk: SwiftUI.framework
+      - sdk: AppIntents.framework
   widget-reload:
     type: tool
     platform: macOS
