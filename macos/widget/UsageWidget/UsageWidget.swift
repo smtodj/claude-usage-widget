@@ -1,8 +1,10 @@
-// Desktop / Notification Center widget showing how much Claude usage is left.
+// Desktop / Notification Center widgets showing how much Claude and Gemini
+// usage is left.
 //
-// The menu bar app writes the latest reading to `usage.json` in this
-// extension's sandbox container (its home directory) and asks WidgetKit to
-// reload. The widget only reads that file; it never talks to the network.
+// The menu bar app writes the latest readings to `usage.json` (Claude) and
+// `gemini.json` in this extension's sandbox container (its home directory)
+// and asks WidgetKit to reload. The widgets only read those files; they
+// never talk to the network.
 
 import AppIntents
 import SwiftUI
@@ -18,6 +20,31 @@ struct RefreshUsageIntent: AppIntent {
     func perform() async throws -> some IntentResult {
         .result()
     }
+}
+
+/// Which service a widget shows. Files and kinds must match the app's
+/// `widget::Feed` (src-tauri/src/widget.rs).
+struct Feed {
+    let kind: String
+    let file: String
+    let name: String
+    let displayName: String
+    let icon: String
+    let tint: Color
+    let emptyMessage: String
+
+    static let claude = Feed(
+        kind: "ClaudeUsageWidget", file: "usage.json", name: "Claude",
+        displayName: "Claude 사용량", icon: "sparkle",
+        tint: Color(red: 0.85, green: 0.47, blue: 0.34),
+        emptyMessage: "메뉴 막대의 Claude Usage 앱을 실행하고 로그인해 주세요."
+    )
+    static let gemini = Feed(
+        kind: "GeminiUsageWidget", file: "gemini.json", name: "Gemini",
+        displayName: "Gemini 사용량", icon: "sparkles",
+        tint: Color(red: 0.26, green: 0.52, blue: 0.96),
+        emptyMessage: "메뉴 막대의 Claude Usage 앱에서 'Gemini로 로그인…'을 눌러 주세요."
+    )
 }
 
 struct UsageWindow: Decodable, Hashable {
@@ -46,8 +73,8 @@ struct UsageData: Decodable {
         case windows, error
     }
 
-    static func load() -> UsageData? {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("usage.json")
+    static func load(_ feed: Feed) -> UsageData? {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(feed.file)
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(UsageData.self, from: data)
     }
@@ -70,17 +97,19 @@ struct UsageEntry: TimelineEntry {
 }
 
 struct Provider: TimelineProvider {
+    let feed: Feed
+
     func placeholder(in context: Context) -> UsageEntry {
         UsageEntry(date: Date(), data: .sample)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (UsageEntry) -> Void) {
-        let data = context.isPreview ? (UsageData.load() ?? .sample) : UsageData.load()
+        let data = context.isPreview ? (UsageData.load(feed) ?? .sample) : UsageData.load(feed)
         completion(UsageEntry(date: Date(), data: data))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<UsageEntry>) -> Void) {
-        let data = UsageData.load()
+        let data = UsageData.load(feed)
         // One entry per minute so the reset countdown keeps moving between
         // the app's updates; the app also asks for a reload when numbers change.
         let now = Date()
@@ -152,6 +181,7 @@ struct WindowRow: View {
 
 struct UsageWidgetView: View {
     @Environment(\.widgetFamily) private var family
+    let feed: Feed
     let entry: UsageEntry
 
     private var compact: Bool { family == .systemSmall }
@@ -168,9 +198,9 @@ struct UsageWidgetView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 10) {
             HStack(spacing: 5) {
-                Image(systemName: "sparkle")
-                    .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
-                Text("Claude")
+                Image(systemName: feed.icon)
+                    .foregroundStyle(feed.tint)
+                Text(feed.name)
                     .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 0)
                 if let data = entry.data, data.error != nil || isStale(data) {
@@ -199,7 +229,7 @@ struct UsageWidgetView: View {
                 }
             } else {
                 Spacer(minLength: 0)
-                Text(entry.data?.error ?? "메뉴 막대의 Claude Usage 앱을 실행하고 로그인해 주세요.")
+                Text(entry.data?.error ?? feed.emptyMessage)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -217,20 +247,27 @@ struct UsageWidgetView: View {
     }
 }
 
-struct UsageWidget: Widget {
-    var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "ClaudeUsageWidget", provider: Provider()) { entry in
-            UsageWidgetView(entry: entry)
-        }
-        .configurationDisplayName("Claude 사용량")
-        .description("남은 사용량과 초기화까지 남은 시간을 보여줘요.")
-        .supportedFamilies([.systemSmall, .systemMedium])
+private func configuration(_ feed: Feed) -> some WidgetConfiguration {
+    StaticConfiguration(kind: feed.kind, provider: Provider(feed: feed)) { entry in
+        UsageWidgetView(feed: feed, entry: entry)
     }
+    .configurationDisplayName(feed.displayName)
+    .description("\(feed.name)의 남은 사용량과 초기화까지 남은 시간을 보여줘요.")
+    .supportedFamilies([.systemSmall, .systemMedium])
+}
+
+struct UsageWidget: Widget {
+    var body: some WidgetConfiguration { configuration(.claude) }
+}
+
+struct GeminiUsageWidget: Widget {
+    var body: some WidgetConfiguration { configuration(.gemini) }
 }
 
 @main
 struct UsageWidgetBundle: WidgetBundle {
     var body: some Widget {
         UsageWidget()
+        GeminiUsageWidget()
     }
 }

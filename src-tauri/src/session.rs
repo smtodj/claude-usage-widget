@@ -18,7 +18,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 // Google refuses to sign in inside embedded webviews it recognizes, and the
 // default WKWebView user agent lacks the "Version/… Safari/…" part it looks
 // for. Present as Safari so "Google로 계속하기" works.
-const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+pub(crate) const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
 
 static POPUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -99,15 +99,35 @@ fn save(key: &str) -> keyring::Result<()> {
     entry()?.set_password(key)
 }
 
-/// Forgets the session key and the login window's cookies, so the next
-/// login can pick a different account.
+/// Forgets the session key and claude.ai's cookies, so the next login can
+/// pick a different account. Other sites' sign-ins (Gemini) are kept.
 pub fn logout(app: &AppHandle) {
     if let Ok(e) = entry() {
         let _ = e.delete_credential();
     }
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.clear_all_browsing_data();
-    }
+    delete_cookies(app, |domain| {
+        domain == "claude.ai" || domain.ends_with(".claude.ai")
+    });
+}
+
+/// Deletes the cookies whose domain (without a leading dot) matches, from
+/// the cookie store all of the app's webviews share.
+pub(crate) fn delete_cookies(app: &AppHandle, matches: impl Fn(&str) -> bool + Send + 'static) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    // Reading cookies on the main thread deadlocks on Windows.
+    std::thread::spawn(move || {
+        let Ok(cookies) = window.cookies() else {
+            return;
+        };
+        for cookie in cookies {
+            let domain = cookie.domain().unwrap_or_default().trim_start_matches('.');
+            if matches(domain) {
+                let _ = window.delete_cookie(cookie);
+            }
+        }
+    });
 }
 
 /// Opens the claude.ai login window (or focuses it) and calls `on_login`

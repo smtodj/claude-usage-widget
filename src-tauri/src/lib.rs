@@ -1,3 +1,4 @@
+mod gemini;
 mod session;
 mod widget;
 
@@ -28,6 +29,16 @@ struct Snapshot {
     source: Option<&'static str>,
     /// Whether a claude.ai session is stored (shows "로그아웃" instead of "로그인").
     web_logged_in: bool,
+    /// Gemini app usage; `None` until the user signs in to Gemini.
+    gemini: Option<GeminiSnapshot>,
+}
+
+#[derive(Clone, Serialize, Default)]
+struct GeminiSnapshot {
+    usage: Option<Usage>,
+    /// When set, `usage` is the last good reading (stale).
+    error: Option<String>,
+    checked_at: Option<DateTime<Utc>>,
 }
 
 struct AppState {
@@ -58,6 +69,17 @@ async fn logout(app: AppHandle) {
     request_refresh(&app.state::<AppState>());
 }
 
+#[tauri::command]
+async fn gemini_login(app: AppHandle) {
+    open_gemini_login(&app);
+}
+
+#[tauri::command]
+async fn gemini_logout(app: AppHandle) {
+    gemini::logout(&app);
+    request_refresh(&app.state::<AppState>());
+}
+
 /// A menu bar (Accessory) app is never the active app, so its new windows
 /// open behind whatever the user is looking at unless it is activated.
 fn bring_app_forward(app: &AppHandle) {
@@ -70,6 +92,11 @@ fn bring_app_forward(app: &AppHandle) {
 fn open_login(app: &AppHandle) {
     bring_app_forward(app);
     session::open_login_window(app, |app| request_refresh(&app.state::<AppState>()));
+}
+
+fn open_gemini_login(app: &AppHandle) {
+    bring_app_forward(app);
+    gemini::open_login_window(app, |app| request_refresh(&app.state::<AppState>()));
 }
 
 fn request_refresh(state: &AppState) {
@@ -92,7 +119,9 @@ pub fn run() {
             get_usage,
             refresh_usage,
             login,
-            logout
+            logout,
+            gemini_login,
+            gemini_logout
         ])
         .setup(|app| {
             // Menu bar only: no Dock icon. Info.plist's LSUIElement already
@@ -178,6 +207,7 @@ fn poll_once(app: &AppHandle, first: bool) {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || open_login(&handle));
     }
+    let gemini = gemini::enabled(app).then(|| gemini::fetch(app));
     let snapshot = {
         let state = app.state::<AppState>();
         let mut snap = state.snapshot.lock().unwrap();
@@ -195,10 +225,39 @@ fn poll_once(app: &AppHandle, first: bool) {
             Err(e) => snap.error = Some(e.to_string()),
         }
         snap.checked_at = Some(Utc::now());
+        snap.gemini = gemini.map(|result| {
+            let mut g = snap.gemini.take().unwrap_or_default();
+            match result {
+                Ok(usage) => {
+                    g.usage = Some(usage);
+                    g.error = None;
+                }
+                // Signed out: last numbers belong to a session that's gone.
+                Err(e @ UsageError::GeminiLoggedOut) => {
+                    g.usage = None;
+                    g.error = Some(e.to_string());
+                }
+                Err(e) => g.error = Some(e.to_string()),
+            }
+            g.checked_at = Some(Utc::now());
+            g
+        });
         snap.clone()
     };
     update_tray(app, snapshot.clone());
-    widget::publish(snapshot.usage.as_ref(), snapshot.error.as_deref());
+    widget::publish(
+        widget::Feed::Claude,
+        snapshot.usage.as_ref(),
+        snapshot.error.as_deref(),
+    );
+    match &snapshot.gemini {
+        Some(g) => widget::publish(widget::Feed::Gemini, g.usage.as_ref(), g.error.as_deref()),
+        None => widget::publish(
+            widget::Feed::Gemini,
+            None,
+            Some(&UsageError::GeminiLoggedOut.to_string()),
+        ),
+    }
     let _ = app.emit("usage-updated", snapshot);
 }
 
@@ -242,6 +301,9 @@ fn build_menu(app: &AppHandle, s: &Snapshot) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
     let info = |text: String| MenuItem::new(app, text, false, None::<&str>);
 
+    if s.gemini.is_some() {
+        menu.append(&info("Claude".into())?)?;
+    }
     if let Some(usage) = &s.usage {
         let now = Utc::now();
         for w in &usage.windows {
@@ -270,6 +332,28 @@ fn build_menu(app: &AppHandle, s: &Snapshot) -> tauri::Result<Menu<Wry>> {
         ))?)?;
     }
 
+    if let Some(g) = &s.gemini {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&info("Gemini".into())?)?;
+        let now = Utc::now();
+        for w in g.usage.iter().flat_map(|u| &u.windows) {
+            menu.append(&info(format!(
+                "{}: {:.0}% 남음 ({:.0}% 사용)",
+                w.label, w.remaining_percent, w.used_percent
+            ))?)?;
+            menu.append(&info(format!("    {}", format_reset(w.resets_at, now)))?)?;
+        }
+        if let Some(err) = &g.error {
+            if g.usage.is_some() {
+                menu.append(&info("⚠︎ 최신 값이 아니에요".into())?)?;
+            }
+            menu.append(&info(format!("⚠︎ {err}"))?)?;
+        }
+        if g.usage.is_none() && g.error.is_none() {
+            menu.append(&info("불러오는 중…".into())?)?;
+        }
+    }
+
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
@@ -289,6 +373,11 @@ fn build_menu(app: &AppHandle, s: &Snapshot) -> tauri::Result<Menu<Wry>> {
         MenuItem::with_id(app, "logout", "claude.ai 로그아웃", true, None::<&str>)?
     } else {
         MenuItem::with_id(app, "login", "claude.ai로 로그인…", true, None::<&str>)?
+    })?;
+    menu.append(&if s.gemini.is_some() {
+        MenuItem::with_id(app, "gemini_logout", "Gemini 로그아웃", true, None::<&str>)?
+    } else {
+        MenuItem::with_id(app, "gemini_login", "Gemini로 로그인…", true, None::<&str>)?
     })?;
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     menu.append(&CheckMenuItem::with_id(
@@ -327,6 +416,11 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         "login" => open_login(app),
         "logout" => {
             session::logout(app);
+            request_refresh(&app.state::<AppState>());
+        }
+        "gemini_login" => open_gemini_login(app),
+        "gemini_logout" => {
+            gemini::logout(app);
             request_refresh(&app.state::<AppState>());
         }
         "quit" => app.exit(0),
