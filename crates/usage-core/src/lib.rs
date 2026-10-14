@@ -8,14 +8,18 @@
 //!
 //! Reading usage does not consume it. Neither endpoint is publicly
 //! documented, and either may change.
+//!
+//! [`parse_gemini_result`] does the same for the Gemini app's limits.
 
 mod credentials;
 mod format;
+mod gemini;
 mod usage;
 mod web;
 
 pub use credentials::{read_credentials, Credentials, CredentialsSource};
 pub use format::{format_reset, short_label};
+pub use gemini::{parse_gemini_result, parse_gemini_usage, GEMINI_FETCH_JS};
 pub use usage::{fetch_usage, parse_usage, Usage, UsageWindow};
 pub use web::fetch_usage_web;
 
@@ -31,6 +35,8 @@ pub enum UsageError {
     TokenExpired,
     #[error("인증에 실패했어요(401). 터미널에서 `claude`를 다시 실행해 주세요.")]
     Unauthorized,
+    #[error("Gemini 로그인이 필요해요. 메뉴에서 'Gemini로 로그인…'을 눌러 주세요.")]
+    GeminiLoggedOut,
     #[error("요청이 너무 많아요(429). 잠시 후 다시 시도할게요.")]
     RateLimited,
     #[error("서버 응답 오류: HTTP {0}")]

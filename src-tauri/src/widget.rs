@@ -1,10 +1,11 @@
-//! Hands the latest reading to the macOS desktop widget.
+//! Hands the latest readings to the macOS desktop widgets.
 //!
-//! The widget (`macos/widget`, bundled as `Contents/PlugIns/UsageWidget.appex`)
-//! is sandboxed and ad-hoc signed, so it can't share an App Group with this
-//! app. Instead this app writes `usage.json` straight into the widget's own
-//! sandbox container, which the widget sees as its home directory, then runs
-//! `widget-reload` to have WidgetKit redraw it.
+//! The widgets (`macos/widget`, bundled as `Contents/PlugIns/UsageWidget.appex`)
+//! are sandboxed and ad-hoc signed, so they can't share an App Group with
+//! this app. Instead this app writes each [`Feed`]'s JSON straight into the
+//! extension's own sandbox container, which it sees as its home directory,
+//! then runs `widget-reload <kind>` to have WidgetKit redraw that widget.
+//!
 //!
 //! WidgetKit gives each widget a daily reload budget (roughly 40–70), and
 //! once it is spent it ignores reload requests for a while, leaving the
@@ -25,6 +26,29 @@ const MIN_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 
 /// Windows the widget displays (see `shownWindows` in UsageWidget.swift).
 const SHOWN_KEYS: [&str; 2] = ["five_hour", "seven_day"];
+
+/// One widget's data. File names and kinds must match UsageWidget.swift.
+#[derive(Clone, Copy)]
+pub enum Feed {
+    Claude = 0,
+    Gemini = 1,
+}
+
+impl Feed {
+    fn file(self) -> &'static str {
+        match self {
+            Feed::Claude => "usage.json",
+            Feed::Gemini => "gemini.json",
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Feed::Claude => "ClaudeUsageWidget",
+            Feed::Gemini => "GeminiUsageWidget",
+        }
+    }
+}
 
 #[derive(Serialize, PartialEq)]
 struct WidgetData {
@@ -88,13 +112,13 @@ fn should_reload(changed: bool, since_last: Option<std::time::Duration>) -> bool
 }
 
 #[cfg(target_os = "macos")]
-pub fn publish(usage: Option<&Usage>, error: Option<&str>) {
+pub fn publish(feed: Feed, usage: Option<&Usage>, error: Option<&str>) {
     use std::sync::Mutex;
 
     use std::time::Instant;
 
-    /// Summary the widget was last asked to redraw with, and when.
-    static LAST_RELOAD: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    /// Per feed: summary its widget was last asked to redraw with, and when.
+    static LAST_RELOAD: Mutex<[Option<(String, Instant)>; 2]> = Mutex::new([None, None]);
 
     let Some(home) = std::env::var_os("HOME") else {
         return;
@@ -116,28 +140,29 @@ pub fn publish(usage: Option<&Usage>, error: Option<&str>) {
     let Ok(json) = serde_json::to_vec(&data) else {
         return;
     };
-    let tmp = dir.join("usage.json.tmp");
-    if std::fs::write(&tmp, json).is_err() || std::fs::rename(&tmp, dir.join("usage.json")).is_err()
+    let tmp = dir.join(format!("{}.tmp", feed.file()));
+    if std::fs::write(&tmp, json).is_err() || std::fs::rename(&tmp, dir.join(feed.file())).is_err()
     {
         return;
     }
 
-    let mut last = LAST_RELOAD.lock().unwrap();
+    let mut all = LAST_RELOAD.lock().unwrap();
+    let last = &mut all[feed as usize];
     let changed = last.as_ref().is_none_or(|(s, _)| *s != shown);
     if should_reload(changed, last.as_ref().map(|(_, at)| at.elapsed())) {
         *last = Some((shown, Instant::now()));
-        drop(last);
+        drop(all);
         let helper = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|d| d.join("widget-reload")));
         if let Some(helper) = helper.filter(|h| h.is_file()) {
-            let _ = std::process::Command::new(helper).status();
+            let _ = std::process::Command::new(helper).arg(feed.kind()).status();
         }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn publish(_usage: Option<&Usage>, _error: Option<&str>) {}
+pub fn publish(_feed: Feed, _usage: Option<&Usage>, _error: Option<&str>) {}
 
 #[cfg(test)]
 mod tests {

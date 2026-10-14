@@ -53,23 +53,37 @@ function card(w) {
   return el;
 }
 
-function render(snap) {
-  const list = $("windows");
+function checkedText(at) {
+  return `마지막 확인 ${new Date(at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+// Fills one provider's cards and error line from `{usage, error}`.
+function renderUsage(s, list, err) {
   list.replaceChildren();
-  if (snap.usage) {
-    snap.usage.windows.forEach((w) => list.append(card(w)));
-  } else if (!snap.error) {
+  if (s.usage) {
+    s.usage.windows.forEach((w) => list.append(card(w)));
+  } else if (!s.error) {
     list.innerHTML = '<p class="muted">불러오는 중…</p>';
   }
-  const err = $("error");
-  err.hidden = !snap.error;
-  err.textContent = snap.error
-    ? (snap.usage ? "최신 값이 아니에요. " : "") + snap.error
+  err.hidden = !s.error;
+  err.textContent = s.error
+    ? (s.usage ? "최신 값이 아니에요. " : "") + s.error
     : "";
+}
+
+function render(snap) {
+  renderUsage(snap, $("windows"), $("error"));
   $("checked").textContent = snap.checked_at
-    ? `마지막 확인 ${new Date(snap.checked_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` +
-      (snap.source ? ` · ${snap.source}` : "")
+    ? checkedText(snap.checked_at) + (snap.source ? ` · ${snap.source}` : "")
     : "";
+
+  const g = snap.gemini;
+  $("gemini").hidden = !g;
+  $("gemini-login").hidden = !!g;
+  if (g) {
+    renderUsage(g, $("gemini-windows"), $("gemini-error"));
+    $("gemini-checked").textContent = g.checked_at ? checkedText(g.checked_at) : "";
+  }
   const account = $("account");
   account.hidden = false;
   account.textContent = snap.web_logged_in ? "claude.ai 로그아웃" : "claude.ai로 로그인";
@@ -77,5 +91,7 @@ function render(snap) {
 }
 
 $("refresh").addEventListener("click", () => invoke("refresh_usage"));
+$("gemini-account").addEventListener("click", () => invoke("gemini_logout"));
+$("gemini-login").addEventListener("click", () => invoke("gemini_login"));
 listen("usage-updated", (e) => render(e.payload));
 invoke("get_usage").then(render);
