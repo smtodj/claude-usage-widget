@@ -264,7 +264,10 @@ struct GeminiUsageWidget: Widget {
     var body: some WidgetConfiguration { configuration(.gemini) }
 }
 
+// The smoke test (macos/build-widget.sh) brings its own entry point.
+#if !WIDGET_SMOKE_TEST
 @main
+#endif
 struct UsageWidgetBundle: WidgetBundle {
     var body: some Widget {
         UsageWidget()

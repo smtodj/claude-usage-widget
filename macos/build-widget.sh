@@ -20,6 +20,21 @@ xcodebuild \
   SYMROOT="$PWD/build/xcode" \
   -quiet build
 
+# Build each widget's configuration the way WidgetKit does when it loads
+# the extension. A WidgetKit assertion there crashes the extension, and
+# macOS then silently leaves the widgets out of the widget gallery.
+smoke=build/smoke
+mkdir -p "$smoke"
+cat > "$smoke/main.swift" <<'SWIFT'
+_ = UsageWidgetBundle().body
+_ = UsageWidget().body
+_ = GeminiUsageWidget().body
+print("widget configurations OK")
+SWIFT
+xcrun swiftc -D WIDGET_SMOKE_TEST -target "$(uname -m)-apple-macos14.0" \
+  UsageWidget/UsageWidget.swift "$smoke/main.swift" -o "$smoke/run"
+"$smoke/run"
+
 out=../build
 rm -rf "$out"
 mkdir -p "$out"
