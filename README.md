@@ -29,7 +29,7 @@ Claude Pro / Max 구독의 **5시간 세션 한도**와 **주간 한도**가 몇
 - macOS 14 (Sonoma) 이상에서는 **바탕화면 위젯**으로도 볼 수 있어요.
 - 2분마다 자동으로 갱신돼요.
 - 사용량을 *조회*만 하므로 Claude 사용량을 소모하지 않아요.
-- **Gemini 앱**(gemini.google.com, Google AI Pro / Ultra)의 5시간·주간 한도도 함께 볼 수 있어요. 메뉴에서 **Gemini로 로그인…** 을 누르세요.
+- **Gemini 앱**(gemini.google.com, Google AI Pro / Ultra)의 5시간·주간 한도도 함께 볼 수 있어요. 메뉴에서 **Gemini로 로그인…** 을 누르세요. 로그인하면 메뉴바가 `✳︎ 72·39  ✦ 77·96`(Claude ✳︎, Gemini ✦의 세션·주간 남은 %)처럼 둘 다 보여줘요.
 
 ## 필요한 것
 
