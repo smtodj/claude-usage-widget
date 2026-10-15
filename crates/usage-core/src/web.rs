@@ -6,6 +6,7 @@
 //! `five_hour` / `seven_day` windows as the OAuth endpoint. It is
 //! authenticated with the `sessionKey` cookie set when you log in.
 
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -24,34 +25,55 @@ struct Organization {
     capabilities: Vec<String>,
 }
 
+/// The organization last picked, with the session key it was picked for.
+/// It hardly ever changes, so polls skip the organizations request.
+static ORGANIZATION: Mutex<Option<(String, String)>> = Mutex::new(None);
+
 /// Fetches usage with a claude.ai `sessionKey` cookie value.
 pub fn fetch_usage_web(session_key: &str) -> Result<Usage, UsageError> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .try_proxy_from_env(true)
-        .build();
-    let get = |path: &str| -> Result<String, UsageError> {
-        let resp = agent
-            .get(&format!("{BASE}{path}"))
-            .set("Cookie", &format!("sessionKey={session_key}"))
-            .set("Accept", "application/json")
-            .set("User-Agent", USER_AGENT)
-            .call();
-        match resp {
-            Ok(r) => r
-                .into_string()
-                .map_err(|e| UsageError::Network(e.to_string())),
-            Err(ureq::Error::Status(401 | 403, _)) => Err(UsageError::SessionExpired),
-            Err(ureq::Error::Status(429, _)) => Err(UsageError::RateLimited),
-            Err(ureq::Error::Status(code, _)) => Err(UsageError::Http(code)),
-            Err(e) => Err(UsageError::Network(e.to_string())),
+    let cached = ORGANIZATION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(key, _)| key == session_key)
+        .map(|(_, org)| org.clone());
+    if let Some(org) = cached {
+        match get(session_key, &format!("/organizations/{org}/usage")) {
+            Ok(body) => return parse_usage(&body, Utc::now()),
+            // Possibly no longer a member: look the organization up again.
+            Err(UsageError::SessionExpired | UsageError::Http(404)) => {}
+            Err(e) => return Err(e),
         }
-    };
-
-    let orgs = get("/organizations")?;
-    let org = pick_organization(&orgs)?;
-    let body = get(&format!("/organizations/{org}/usage"))?;
+    }
+    let org = pick_organization(&get(session_key, "/organizations")?)?;
+    *ORGANIZATION.lock().unwrap() = Some((session_key.to_string(), org.clone()));
+    let body = get(session_key, &format!("/organizations/{org}/usage"))?;
     parse_usage(&body, Utc::now())
+}
+
+fn get(session_key: &str, path: &str) -> Result<String, UsageError> {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(15))
+            .try_proxy_from_env(true)
+            .build()
+    });
+    let resp = agent
+        .get(&format!("{BASE}{path}"))
+        .set("Cookie", &format!("sessionKey={session_key}"))
+        .set("Accept", "application/json")
+        .set("User-Agent", USER_AGENT)
+        .call();
+    match resp {
+        Ok(r) => r
+            .into_string()
+            .map_err(|e| UsageError::Network(e.to_string())),
+        Err(ureq::Error::Status(401 | 403, _)) => Err(UsageError::SessionExpired),
+        Err(ureq::Error::Status(429, _)) => Err(UsageError::RateLimited),
+        Err(ureq::Error::Status(code, _)) => Err(UsageError::Http(code)),
+        Err(e) => Err(UsageError::Network(e.to_string())),
+    }
 }
 
 /// Picks the organization that holds the chat subscription; personal
