@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
-use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
@@ -130,10 +129,14 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
-            TrayIconBuilder::with_id(TRAY_ID)
-                .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
-                .icon_as_template(true)
-                .title("Claude …")
+            let tray = TrayIconBuilder::with_id(TRAY_ID);
+            // The macOS menu bar shows just the numbers; Windows' tray has
+            // no text, so it needs the icon.
+            #[cfg(not(target_os = "macos"))]
+            let tray = tray.icon(tauri::image::Image::from_bytes(include_bytes!(
+                "../icons/tray.png"
+            ))?);
+            tray.title("Claude …")
                 .tooltip("Claude 사용량")
                 .menu(&build_menu(&handle, &Snapshot::default())?)
                 .show_menu_on_left_click(true)
@@ -192,7 +195,23 @@ fn read_usage() -> (Result<Usage, UsageError>, &'static str, bool) {
     }
 }
 
+/// Reads Claude and Gemini side by side, so a slow Gemini page never holds
+/// up the Claude numbers; each one shows up as soon as it's read.
 fn poll_once(app: &AppHandle, first: bool) {
+    std::thread::scope(|scope| {
+        if gemini::enabled(app) {
+            scope.spawn(|| {
+                let result = gemini::fetch(app);
+                set_gemini(app, Some(result));
+            });
+        } else {
+            set_gemini(app, None);
+        }
+        poll_claude(app, first);
+    });
+}
+
+fn poll_claude(app: &AppHandle, first: bool) {
     let (result, source, web_logged_in) = read_usage();
     // First launch without a working login: open the login window right
     // away. Claude Code being absent, expired or unreadable all count.
@@ -207,8 +226,7 @@ fn poll_once(app: &AppHandle, first: bool) {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || open_login(&handle));
     }
-    let gemini = gemini::enabled(app).then(|| gemini::fetch(app));
-    let snapshot = {
+    let (usage, error) = {
         let state = app.state::<AppState>();
         let mut snap = state.snapshot.lock().unwrap();
         // Don't show the previous account's numbers after switching sources.
@@ -225,7 +243,18 @@ fn poll_once(app: &AppHandle, first: bool) {
             Err(e) => snap.error = Some(e.to_string()),
         }
         snap.checked_at = Some(Utc::now());
-        snap.gemini = gemini.map(|result| {
+        (snap.usage.clone(), snap.error.clone())
+    };
+    widget::publish(widget::Feed::Claude, usage.as_ref(), error.as_deref());
+    show(app);
+}
+
+/// Records a Gemini reading, or `None` when Gemini isn't signed in.
+fn set_gemini(app: &AppHandle, result: Option<Result<Usage, UsageError>>) {
+    let gemini = {
+        let state = app.state::<AppState>();
+        let mut snap = state.snapshot.lock().unwrap();
+        snap.gemini = result.map(|result| {
             let mut g = snap.gemini.take().unwrap_or_default();
             match result {
                 Ok(usage) => {
@@ -242,15 +271,9 @@ fn poll_once(app: &AppHandle, first: bool) {
             g.checked_at = Some(Utc::now());
             g
         });
-        snap.clone()
+        snap.gemini.clone()
     };
-    update_tray(app, snapshot.clone());
-    widget::publish(
-        widget::Feed::Claude,
-        snapshot.usage.as_ref(),
-        snapshot.error.as_deref(),
-    );
-    match &snapshot.gemini {
+    match &gemini {
         Some(g) => widget::publish(widget::Feed::Gemini, g.usage.as_ref(), g.error.as_deref()),
         None => widget::publish(
             widget::Feed::Gemini,
@@ -258,27 +281,40 @@ fn poll_once(app: &AppHandle, first: bool) {
             Some(&UsageError::GeminiLoggedOut.to_string()),
         ),
     }
-    let _ = app.emit("usage-updated", snapshot);
+    // Signed out: the Claude half of the same poll redraws the tray.
+    if gemini.is_some() {
+        show(app);
+    }
 }
 
-fn update_tray(app: &AppHandle, snapshot: Snapshot) {
+/// Redraws the tray and the details window from the current snapshot.
+fn show(app: &AppHandle) {
     let handle = app.clone();
+    // Both readers call this; reading the snapshot on the main thread, not
+    // passing a copy, keeps an older copy from landing last.
     let _ = app.run_on_main_thread(move || {
-        let Some(tray) = handle.tray_by_id(TRAY_ID) else {
-            return;
-        };
-        let title = tray_title(&snapshot);
-        let _ = tray.set_title(Some(&title));
-        let tooltip = if snapshot.gemini.is_some() {
-            format!("남은 사용량 (세션·주간), ✳︎ Claude, ✦ Gemini: {title}")
-        } else {
-            format!("Claude 남은 사용량: {title}")
-        };
-        let _ = tray.set_tooltip(Some(tooltip));
-        if let Ok(menu) = build_menu(&handle, &snapshot) {
-            let _ = tray.set_menu(Some(menu));
-        }
+        let snapshot = handle.state::<AppState>().snapshot.lock().unwrap().clone();
+        let _ = handle.emit("usage-updated", &snapshot);
+        update_tray(&handle, &snapshot);
     });
+}
+
+/// Call on the main thread.
+fn update_tray(app: &AppHandle, snapshot: &Snapshot) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let title = tray_title(snapshot);
+    let _ = tray.set_title(Some(&title));
+    let tooltip = if snapshot.gemini.is_some() {
+        format!("남은 사용량 (세션·주간), ✳︎ Claude, ✦ Gemini: {title}")
+    } else {
+        format!("Claude 남은 사용량: {title}")
+    };
+    let _ = tray.set_tooltip(Some(tooltip));
+    if let Ok(menu) = build_menu(app, snapshot) {
+        let _ = tray.set_menu(Some(menu));
+    }
 }
 
 /// "5h 72% · 7d 39%" (remaining), with a warning mark when the last read
@@ -447,8 +483,7 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             } else {
                 launch.enable()
             };
-            let snapshot = app.state::<AppState>().snapshot.lock().unwrap().clone();
-            update_tray(app, snapshot);
+            show(app);
         }
         "login" => open_login(app),
         "logout" => {
