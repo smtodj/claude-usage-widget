@@ -1,64 +1,52 @@
 //! Reads the Gemini app's (gemini.google.com) usage limits.
 //!
-//! Gemini's Settings → Usage limits page calls the private `jSf9Qc` RPC on
-//! `/_/BardChatUi/data/batchexecute`. The request has to carry the user's
-//! Google session, so the app sends it from a webview signed in to Gemini
-//! (see [`GEMINI_FETCH_JS`]); this module only turns the response into a
-//! [`Usage`].
+//! Gemini's Settings → Usage limits page (`/usage`) ships its numbers inside
+//! the page itself, in `<script type="application/json" data-bg3-relay-preload>`
+//! blocks. One of the strings in there holds a `getUsageInfo` object:
 //!
-//! The RPC's payload is `[2, [[limit, used, type, [[reset_secs, nanos]]], …], …]`
-//! where type 1 is the rolling 5-hour window and type 2 the weekly one.
-//! Like the Claude endpoints it is undocumented and may change, so anything
-//! that doesn't fit that shape is an error rather than a guessed number.
+//! ```json
+//! {"subscriptionTier":"TIER1","pools":[
+//!   {"poolType":"GXU_WEEKLY","percentageUsed":0.038,"gxu":{"windowRefreshesAt":"2026-10-20T04:38:38Z"}},
+//!   {"poolType":"GXU_FIVE_HOURLY","percentageUsed":0.23,"gxu":{"windowRefreshesAt":"2026-10-15T05:38:38Z"}}]}
+//! ```
+//!
+//! `percentageUsed` is a fraction and, protobuf style, left out when zero.
+//! The page has to be loaded with the user's Google session, so the app
+//! fetches it from a webview signed in to Gemini (see [`GEMINI_FETCH_JS`]);
+//! this module only turns those blocks into a [`Usage`]. Like the Claude
+//! endpoints this is undocumented and may change, so anything that doesn't
+//! fit that shape is an error rather than a guessed number.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::{Usage, UsageError, UsageWindow};
 
-pub const GEMINI_USAGE_RPC: &str = "jSf9Qc";
-
-/// Page script that fetches the usage RPC from a gemini.google.com page.
+/// Page script that loads the usage page from a gemini.google.com page.
 ///
-/// `__ID__` is replaced with a request id and `__FRESH__` with `true` to
-/// skip the tokens embedded in the page (they can go stale on a page left
-/// open for long). The outcome lands in `window.__claudeUsageGemini` as
-/// `{id, text}`, `text` being `OK:<response body>`, `E:login`,
-/// `E:http:<status>` or `E:net:<message>`.
+/// `__ID__` is replaced with a request id. The outcome lands in
+/// `window.__claudeUsageGemini` as `{id, text}`, `text` being `OK:<JSON array
+/// of the page's preload blocks>`, `E:login`, `E:http:<status>` or
+/// `E:net:<message>`.
 pub const GEMINI_FETCH_JS: &str = r#"
 (async () => {
   const id = __ID__;
   const done = (text) => { window.__claudeUsageGemini = { id, text }; };
-  const origin = "https://gemini.google.com";
   try {
     if (location.host !== "gemini.google.com") return done("E:login");
-    let at, bl;
-    const g = window.WIZ_global_data;
-    if (!__FRESH__ && g) { at = g.SNlM0e; bl = g.cfb2h; }
-    if (!at || !bl) {
-      const html = await (await fetch(origin + "/app", { credentials: "include" })).text();
-      at = (/"SNlM0e":"([^"]+)"/.exec(html) || [])[1];
-      bl = (/"cfb2h":"([^"]+)"/.exec(html) || [])[1];
-    }
-    // No XSRF token means nobody is signed in.
-    if (!at || !bl) return done("E:login");
-    const body = new URLSearchParams({
-      "f.req": JSON.stringify([[["jSf9Qc", "[]", null, "generic"]]]),
-      at,
-    });
-    const res = await fetch(
-      origin + "/_/BardChatUi/data/batchexecute?rpcids=jSf9Qc&source-path=%2Fusage&bl=" +
-        encodeURIComponent(bl) + "&rt=c",
-      {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body,
-      },
-    );
+    const res = await fetch("https://gemini.google.com/usage?hl=ko", { credentials: "include" });
+    // Signed-out visitors get sent to Google's sign-in.
+    if (new URL(res.url).host !== "gemini.google.com") return done("E:login");
     if (res.status === 401 || res.status === 403) return done("E:login");
     if (!res.ok) return done("E:http:" + res.status);
-    done("OK:" + (await res.text()));
+    const html = await res.text();
+    const blocks = [];
+    const re = /<script\b[^>]*\bdata-bg3-relay-preload\b[^>]*>([\s\S]*?)<\/script>/g;
+    for (let m; (m = re.exec(html)); ) blocks.push(m[1]);
+    // No XSRF token on the page means nobody is signed in.
+    const g = window.WIZ_global_data;
+    if (!blocks.length && !(g && g.SNlM0e)) return done("E:login");
+    done("OK:" + JSON.stringify(blocks));
   } catch (e) {
     done("E:net:" + e);
   }
@@ -67,8 +55,10 @@ pub const GEMINI_FETCH_JS: &str = r#"
 
 /// Turns the page script's outcome (see [`GEMINI_FETCH_JS`]) into usage.
 pub fn parse_gemini_result(text: &str, now: DateTime<Utc>) -> Result<Usage, UsageError> {
-    if let Some(body) = text.strip_prefix("OK:") {
-        return parse_gemini_usage(body, now);
+    if let Some(blocks) = text.strip_prefix("OK:") {
+        let blocks: Vec<String> =
+            serde_json::from_str(blocks).map_err(|e| format_changed(&e.to_string()))?;
+        return parse_gemini_usage(&blocks, now);
     }
     let err = text.strip_prefix("E:").unwrap_or(text);
     if err == "login" {
@@ -86,22 +76,20 @@ pub fn parse_gemini_result(text: &str, now: DateTime<Utc>) -> Result<Usage, Usag
     ))
 }
 
-/// Parses a `batchexecute` response body for the usage RPC.
-pub fn parse_gemini_usage(body: &str, now: DateTime<Utc>) -> Result<Usage, UsageError> {
-    let row = rpc_row(body).ok_or_else(|| format_changed("응답에 사용량 항목이 없어요"))?;
-    // A row without a payload is how the RPC reports a missing or expired
-    // session (error code 7) while answering HTTP 200.
-    let Some(payload) = row.get(2).and_then(Value::as_str) else {
-        return Err(UsageError::GeminiLoggedOut);
-    };
-    let payload: Value =
-        serde_json::from_str(payload).map_err(|e| format_changed(&e.to_string()))?;
-    let entries = payload
-        .get(1)
+/// Parses the usage page's preload blocks (each one the text of a
+/// `data-bg3-relay-preload` script).
+pub fn parse_gemini_usage(blocks: &[String], now: DateTime<Utc>) -> Result<Usage, UsageError> {
+    let info = blocks
+        .iter()
+        .filter_map(|b| serde_json::from_str::<Value>(b).ok())
+        .find_map(|v| find_usage_info(&v))
+        .ok_or_else(|| format_changed("페이지에 사용량 정보가 없어요"))?;
+    let pools = info
+        .get("pools")
         .and_then(Value::as_array)
         .ok_or_else(|| format_changed("사용량 목록이 없어요"))?;
 
-    let mut windows: Vec<UsageWindow> = entries.iter().filter_map(read_window).collect();
+    let mut windows: Vec<UsageWindow> = pools.iter().filter_map(read_window).collect();
     if windows.is_empty() {
         return Err(format_changed("알아볼 수 있는 한도가 없어요"));
     }
@@ -112,41 +100,49 @@ pub fn parse_gemini_usage(body: &str, now: DateTime<Utc>) -> Result<Usage, Usage
     })
 }
 
-/// The `["wrb.fr", "jSf9Qc", payload, …]` row. The body starts with the
-/// `)]}'` guard and, with `rt=c`, alternates length lines and JSON lines.
-fn rpc_row(body: &str) -> Option<Vec<Value>> {
-    body.lines()
-        .filter_map(|line| serde_json::from_str::<Vec<Value>>(line.trim()).ok())
-        .flatten()
-        .filter_map(|row| match row {
-            Value::Array(row) => Some(row),
-            _ => None,
-        })
-        .find(|row| {
-            row.first().and_then(Value::as_str) == Some("wrb.fr")
-                && row.get(1).and_then(Value::as_str) == Some(GEMINI_USAGE_RPC)
-        })
+const USAGE_KEY: &str = "\"getUsageInfo\":";
+
+/// The `getUsageInfo` object. The preload blocks nest it in JSON encoded as
+/// strings (`{"events":[{"chunk":"[{\"data\":…"}]}`), so this looks through
+/// every string and reads the value that follows the key.
+fn find_usage_info(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(map) => map
+            .get("getUsageInfo")
+            .filter(|info| info.is_object())
+            .cloned()
+            .or_else(|| map.values().find_map(find_usage_info)),
+        Value::Array(items) => items.iter().find_map(find_usage_info),
+        Value::String(s) => {
+            let start = s.find(USAGE_KEY)? + USAGE_KEY.len();
+            serde_json::Deserializer::from_str(&s[start..])
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+                .filter(Value::is_object)
+        }
+        _ => None,
+    }
 }
 
-/// `[limit, used, type, [[reset_secs, nanos]]]`
-fn read_window(entry: &Value) -> Option<UsageWindow> {
-    let limit = entry.get(0)?.as_f64()?;
-    let used = entry.get(1)?.as_f64()?;
-    if limit <= 0.0 || used < 0.0 {
-        return None;
-    }
-    let (key, label) = match entry.get(2)?.as_i64()? {
-        1 => ("five_hour", "5시간 세션"),
-        2 => ("seven_day", "주간"),
+/// `{"poolType", "percentageUsed", "gxu": {"windowRefreshesAt"}}`
+fn read_window(pool: &Value) -> Option<UsageWindow> {
+    let (key, label) = match pool.get("poolType")?.as_str()? {
+        "GXU_FIVE_HOURLY" => ("five_hour", "5시간 세션"),
+        "GXU_WEEKLY" => ("seven_day", "주간"),
         _ => return None,
     };
-    let used_percent = (used / limit * 100.0).clamp(0.0, 100.0);
-    let resets_at = entry
-        .get(3)
-        .and_then(|r| r.get(0))
-        .and_then(|r| r.get(0))
-        .and_then(Value::as_i64)
-        .and_then(|secs| DateTime::from_timestamp(secs, 0));
+    let used = match pool.get("percentageUsed") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v.as_f64()?,
+    };
+    let used_percent = (used * 100.0).clamp(0.0, 100.0);
+    let resets_at = pool
+        .get("gxu")
+        .and_then(|g| g.get("windowRefreshesAt"))
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc));
     Some(UsageWindow {
         key: key.into(),
         label: label.into(),
@@ -164,55 +160,68 @@ fn format_changed(detail: &str) -> UsageError {
 mod tests {
     use super::*;
 
-    // A real response shape, captured by AIQuotaTool (MIT).
-    const RAW: &str = concat!(
-        ")]}'\n\n188\n",
-        r#"[["wrb.fr","jSf9Qc","[2,[[48384,12096,2,[[1790777593,651754000]]],[2400,600,1,[[1790230393,651662000]]]],false]",null,null,null,"generic"],["di",222]]"#,
-        "\n25\n",
-        r#"[["e",4,null,null,224]]"#,
-        "\n"
+    /// The preload block as the usage page ships it (trimmed after the
+    /// usage object, which the parser doesn't need).
+    const PAGE_CHUNK: &str = concat!(
+        r#"[{"data":{"viewer":{"rpcs":{"getUserStatus":{"featureGates":["CAN_ENROLL_IN_AUREUS"]},"#,
+        r#""getUsageInfo":{"subscriptionTier":"TIER1","pools":["#,
+        r#"{"poolType":"GXU_WEEKLY","percentageUsed":0.03802563,"gxu":{"windowRefreshesAt":"2026-10-20T04:38:38.164214Z"}},"#,
+        r#"{"poolType":"GXU_FIVE_HOURLY","percentageUsed":0.23,"gxu":{"windowRefreshesAt":"2026-10-15T05:38:38.164073Z"}}],"#,
+        r#""advancedSettings":null,"useOverageAiCredits":false},"id":"ViewerRpcs__viewer_rpcs_v1","#
     );
 
-    #[test]
-    fn parses_session_and_weekly_limits() {
-        let u = parse_gemini_usage(RAW, Utc::now()).unwrap();
-        let keys: Vec<_> = u.windows.iter().map(|w| w.key.as_str()).collect();
-        assert_eq!(keys, ["five_hour", "seven_day"]);
-        let session = u.window("five_hour").unwrap();
-        assert_eq!(session.used_percent, 25.0);
-        assert_eq!(session.remaining_percent, 75.0);
-        assert_eq!(session.resets_at.unwrap().timestamp(), 1_790_230_393);
-        let week = u.window("seven_day").unwrap();
-        assert_eq!(week.remaining_percent, 75.0);
-        assert_eq!(week.resets_at.unwrap().timestamp(), 1_790_777_593);
+    fn block(chunk: &str) -> String {
+        serde_json::json!({"events": [{"id": "usage:0", "kind": "chunk", "chunk": chunk}]})
+            .to_string()
     }
 
     #[test]
-    fn payload_less_row_means_signed_out() {
-        let body = ")]}'\n\n60\n[[\"wrb.fr\",\"jSf9Qc\",null,null,null,[7],\"generic\"]]\n";
-        assert!(matches!(
-            parse_gemini_usage(body, Utc::now()),
-            Err(UsageError::GeminiLoggedOut)
-        ));
+    fn parses_session_and_weekly_limits() {
+        let u = parse_gemini_usage(&[block(PAGE_CHUNK)], Utc::now()).unwrap();
+        let keys: Vec<_> = u.windows.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, ["five_hour", "seven_day"]);
+        let session = u.window("five_hour").unwrap();
+        assert!((session.used_percent - 23.0).abs() < 1e-9);
+        assert!((session.remaining_percent - 77.0).abs() < 1e-9);
+        assert_eq!(session.resets_at.unwrap().timestamp(), 1_792_042_718);
+        let week = u.window("seven_day").unwrap();
+        assert!((week.used_percent - 3.802563).abs() < 1e-6);
+        assert_eq!(week.resets_at.unwrap().timestamp(), 1_792_471_118);
+    }
+
+    #[test]
+    fn missing_percentage_means_unused() {
+        let chunk = r#"[{"getUsageInfo":{"pools":[{"poolType":"GXU_FIVE_HOURLY","gxu":{}}]}}]"#;
+        let u = parse_gemini_usage(&[block(chunk)], Utc::now()).unwrap();
+        let session = u.window("five_hour").unwrap();
+        assert_eq!(session.remaining_percent, 100.0);
+        assert!(session.resets_at.is_none());
+    }
+
+    #[test]
+    fn skips_unrelated_blocks() {
+        let blocks = ["not json".to_string(), "{}".to_string(), block(PAGE_CHUNK)];
+        assert!(parse_gemini_usage(&blocks, Utc::now()).is_ok());
     }
 
     #[test]
     fn rejects_unknown_shapes() {
-        for payload in ["[2,\"x\"]", "[2,[[0,0,1,[]]]]", "[2,[[10,0,9,[]]]]", "[]"] {
-            let body = format!(
-                ")]}}'\n{}\n",
-                serde_json::json!([["wrb.fr", "jSf9Qc", payload, null, null, null, "generic"]])
-            );
+        for chunk in [
+            r#"[{"data":{}}]"#,
+            r#"{"getUsageInfo":{"pools":"x"}}"#,
+            r#"{"getUsageInfo":{"pools":[{"poolType":"OTHER","percentageUsed":0.5}]}}"#,
+            r#"{"getUsageInfo":{"pools":[{"poolType":"GXU_WEEKLY","percentageUsed":"x"}]}}"#,
+        ] {
             assert!(
                 matches!(
-                    parse_gemini_usage(&body, Utc::now()),
+                    parse_gemini_usage(&[block(chunk)], Utc::now()),
                     Err(UsageError::Parse(_))
                 ),
-                "{payload}"
+                "{chunk}"
             );
         }
         assert!(matches!(
-            parse_gemini_usage("<html>", Utc::now()),
+            parse_gemini_usage(&[], Utc::now()),
             Err(UsageError::Parse(_))
         ));
     }
@@ -220,7 +229,12 @@ mod tests {
     #[test]
     fn maps_page_script_outcomes() {
         let now = Utc::now();
-        assert!(parse_gemini_result(&format!("OK:{RAW}"), now).is_ok());
+        let ok = format!("OK:{}", serde_json::json!([block(PAGE_CHUNK)]));
+        assert!(parse_gemini_result(&ok, now).is_ok());
+        assert!(matches!(
+            parse_gemini_result("OK:<html>", now),
+            Err(UsageError::Parse(_))
+        ));
         assert!(matches!(
             parse_gemini_result("E:login", now),
             Err(UsageError::GeminiLoggedOut)
