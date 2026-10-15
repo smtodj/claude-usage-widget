@@ -29,19 +29,25 @@ struct Feed {
     let file: String
     let name: String
     let displayName: String
+    /// Plain text: WidgetKit traps on interpolated (formatted) descriptions.
+    let description: String
     let icon: String
     let tint: Color
     let emptyMessage: String
 
     static let claude = Feed(
         kind: "ClaudeUsageWidget", file: "usage.json", name: "Claude",
-        displayName: "Claude 사용량", icon: "sparkle",
+        displayName: "Claude 사용량",
+        description: "Claude의 남은 사용량과 초기화까지 남은 시간을 보여줘요.",
+        icon: "sparkle",
         tint: Color(red: 0.85, green: 0.47, blue: 0.34),
         emptyMessage: "메뉴 막대의 Claude Usage 앱을 실행하고 로그인해 주세요."
     )
     static let gemini = Feed(
         kind: "GeminiUsageWidget", file: "gemini.json", name: "Gemini",
-        displayName: "Gemini 사용량", icon: "sparkles",
+        displayName: "Gemini 사용량",
+        description: "Gemini의 남은 사용량과 초기화까지 남은 시간을 보여줘요.",
+        icon: "sparkles",
         tint: Color(red: 0.26, green: 0.52, blue: 0.96),
         emptyMessage: "메뉴 막대의 Claude Usage 앱에서 'Gemini로 로그인…'을 눌러 주세요."
     )
@@ -252,7 +258,7 @@ private func configuration(_ feed: Feed) -> some WidgetConfiguration {
         UsageWidgetView(feed: feed, entry: entry)
     }
     .configurationDisplayName(feed.displayName)
-    .description("\(feed.name)의 남은 사용량과 초기화까지 남은 시간을 보여줘요.")
+    .description(feed.description)
     .supportedFamilies([.systemSmall, .systemMedium])
 }
 
