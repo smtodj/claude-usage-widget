@@ -269,15 +269,33 @@ fn update_tray(app: &AppHandle, snapshot: Snapshot) {
         };
         let title = tray_title(&snapshot);
         let _ = tray.set_title(Some(&title));
-        let _ = tray.set_tooltip(Some(format!("Claude 남은 사용량: {title}")));
+        let tooltip = if snapshot.gemini.is_some() {
+            format!("남은 사용량 (세션·주간), ✳︎ Claude, ✦ Gemini: {title}")
+        } else {
+            format!("Claude 남은 사용량: {title}")
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
         if let Ok(menu) = build_menu(&handle, &snapshot) {
             let _ = tray.set_menu(Some(menu));
         }
     });
 }
 
-/// "5h 72% · 7d 39%" (remaining), with a warning mark when the last read failed.
+/// "5h 72% · 7d 39%" (remaining), with a warning mark when the last read
+/// failed. Once Gemini is signed in both services share the bar as
+/// "✳︎ 72·39  ✦ 77·96" (session·weekly remaining).
 fn tray_title(s: &Snapshot) -> String {
+    let Some(gemini) = &s.gemini else {
+        return claude_title(s);
+    };
+    format!(
+        "✳︎ {}  ✦ {}",
+        compact(s.usage.as_ref(), s.error.is_some()),
+        compact(gemini.usage.as_ref(), gemini.error.is_some())
+    )
+}
+
+fn claude_title(s: &Snapshot) -> String {
     let Some(usage) = &s.usage else {
         return if s.error.is_some() {
             "Claude ⚠︎".into()
@@ -295,6 +313,25 @@ fn tray_title(s: &Snapshot) -> String {
         title.push_str(" ⚠︎");
     }
     title
+}
+
+/// "72·39": session and weekly remaining, "–" for a missing window.
+fn compact(usage: Option<&Usage>, failed: bool) -> String {
+    let Some(usage) = usage else {
+        return if failed { "⚠︎" } else { "…" }.into();
+    };
+    let mut text = ["five_hour", "seven_day"]
+        .iter()
+        .map(|k| match usage.window(k) {
+            Some(w) => format!("{:.0}", w.remaining_percent),
+            None => "–".into(),
+        })
+        .collect::<Vec<_>>()
+        .join("·");
+    if failed {
+        text.push_str("⚠︎");
+    }
+    text
 }
 
 fn build_menu(app: &AppHandle, s: &Snapshot) -> tauri::Result<Menu<Wry>> {
@@ -425,5 +462,54 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         "quit" => app.exit(0),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use usage_core::UsageWindow;
+
+    fn usage(session: f64, week: f64) -> Usage {
+        let window = |key: &str, remaining: f64| UsageWindow {
+            key: key.into(),
+            label: key.into(),
+            used_percent: 100.0 - remaining,
+            remaining_percent: remaining,
+            resets_at: None,
+        };
+        Usage {
+            windows: vec![window("five_hour", session), window("seven_day", week)],
+            fetched_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn claude_only_keeps_the_long_title() {
+        let s = Snapshot {
+            usage: Some(usage(76.0, 71.0)),
+            ..Default::default()
+        };
+        assert_eq!(tray_title(&s), "5h 76% · 7d 71%");
+    }
+
+    #[test]
+    fn both_services_share_the_bar() {
+        let mut s = Snapshot {
+            usage: Some(usage(76.0, 71.0)),
+            gemini: Some(GeminiSnapshot {
+                usage: Some(usage(77.0, 96.2)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(tray_title(&s), "✳︎ 76·71  ✦ 77·96");
+
+        s.error = Some("x".into());
+        s.gemini = Some(GeminiSnapshot {
+            error: Some("x".into()),
+            ..Default::default()
+        });
+        assert_eq!(tray_title(&s), "✳︎ 76·71⚠︎  ✦ ⚠︎");
     }
 }
