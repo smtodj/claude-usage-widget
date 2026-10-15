@@ -173,25 +173,18 @@ pub fn fetch(app: &AppHandle) -> Result<Usage, UsageError> {
         // Sent to Google's sign-in: the session is gone.
         return Err(UsageError::GeminiLoggedOut);
     }
-    match run(&window, false) {
-        // The tokens a long-open page holds can expire; try fresh ones,
-        // and reload the page if even those don't work.
-        Err(UsageError::GeminiLoggedOut) => {
-            let result = run(&window, true);
-            if matches!(result, Err(UsageError::GeminiLoggedOut)) {
-                let _ = window.eval("location.reload()");
-            }
-            result
-        }
-        result => result,
+    let result = run(&window);
+    if matches!(result, Err(UsageError::GeminiLoggedOut)) {
+        // The page may hold a session that has since ended; reload it so
+        // the next poll sees where Google sends it.
+        let _ = window.eval("location.reload()");
     }
+    result
 }
 
-fn run(window: &WebviewWindow, fresh: bool) -> Result<Usage, UsageError> {
+fn run(window: &WebviewWindow) -> Result<Usage, UsageError> {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let js = GEMINI_FETCH_JS
-        .replace("__ID__", &id.to_string())
-        .replace("__FRESH__", if fresh { "true" } else { "false" });
+    let js = GEMINI_FETCH_JS.replace("__ID__", &id.to_string());
     window
         .eval(js)
         .map_err(|e| UsageError::Network(e.to_string()))?;
